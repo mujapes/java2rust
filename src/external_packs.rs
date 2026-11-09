@@ -60,6 +60,7 @@ const HTSJDK_NESTED_HELPER_PACK: &str = "htsjdk.nested_helper";
 const TRIBBLE_FEATURE_PACK: &str = "htsjdk.tribble.feature";
 const TRIBBLE_INDEX_PACK: &str = "htsjdk.tribble.index";
 const SAMTOOLS_UTIL_PACK: &str = "htsjdk.samtools.util";
+const ANDROID_PACK: &str = "android";
 const HDF5_PACK: &str = "hdf5";
 const SQLITE_PACK: &str = "sqlite";
 const JAVA_SQL_PACK: &str = "java.sql";
@@ -4773,6 +4774,73 @@ const JAVA_SQL_OWNED_TYPES: &[&str] = &[
     "java.sql.Timestamp",
     "java.sql.SQLException",
 ];
+const ANDROID_OWNED_TYPES: &[&str] = &[
+    "android.view.View",
+    "android.widget.TextView",
+    "android.content.Context",
+    "android.content.res.Resources",
+    "android.view.LayoutInflater",
+];
+
+// Platform calls the sign-in closure makes (android-bridge-spec.json). Each
+// receiver resolves to the host bridge in android-bridge/rdl_bridge.rs.
+const ANDROID_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_arity(
+        "android.content.Context",
+        "getResources",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "android.content.res.Resources",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "android.content.res.Resources",
+        "getInteger",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "android.view.LayoutInflater",
+        "inflate",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "android.view.View",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "android.view.LayoutInflater",
+        "inflate",
+        3,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "android.view.View",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "android.view.View",
+        "setOnClickListener",
+        1,
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "android.widget.TextView",
+        "setTextColor",
+        1,
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::DefinitelyNonNull,
+    ),
+];
+
 const SAMTOOLS_UTIL_OWNED_TYPES: &[&str] = &[
     "htsjdk.samtools.util.AbstractAsyncWriter",
     "AbstractAsyncWriter",
@@ -29622,6 +29690,26 @@ fn build_builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             modeled_apis: &[],
             modeled_constructors: &[],
             modeled_fields: TRIBBLE_INDEX_MODELED_FIELDS,
+            unsupported_apis: &[],
+        },
+        ExternalPackManifest {
+            pack_name: ANDROID_PACK,
+            owned_type_patterns: ANDROID_OWNED_TYPES,
+            mode: ExternalLibraryMode::RustCrateMapping,
+            default_coverage: ExternalApiCoverage::Mapped,
+            // Items come from the runtime module included by translate.py
+            // (--rust-runtime-source android_framework.rs).
+            rust_target: Some("crate::android_framework"),
+            object_strategies: &[],
+            closed_hierarchy: NO_CLOSED_HIERARCHY,
+            type_capabilities: NO_TYPE_CAPABILITIES,
+            field_nullability: NO_FIELD_NULLABILITY,
+            argument_effects: NO_ARGUMENT_EFFECTS,
+            exceptions: NO_EXCEPTIONS,
+            api_effects: ANDROID_API_EFFECTS,
+            modeled_apis: &[],
+            modeled_constructors: &[],
+            modeled_fields: NO_MODELED_FIELDS,
             unsupported_apis: &[],
         },
         ExternalPackManifest {

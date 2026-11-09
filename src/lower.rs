@@ -637,6 +637,7 @@ fn lower_program_with_semantic_plans_support_context_and_callable_context_in_loo
     context_sources_are_emitted: bool,
     callable_context: &LoweringCallableContext,
 ) -> LoweredProgram {
+    crate::item_assembly::clear_static_final_const_info_cache();
     let rendering_representations = (representations.source_generic_allocations
         != signatures.source_generic_allocations
         || representations.hierarchy_products.is_none())
@@ -8862,13 +8863,26 @@ fn collect_emitted_context_type_rust_use_name_matches<'a>(
     }
 }
 
+/// Same answer as `rust_use_name_for_source_type(ty) == rust_use_name`, without
+/// allocating. A plain top-level name with no `.`, `$` or `Result` maps to
+/// itself and no type parameters are appended, so compare it directly.
+fn source_type_rust_use_name_matches(ty: &TypeDecl, rust_use_name: &str) -> bool {
+    if ty.type_params.is_empty()
+        && !ty.name.contains(['.', '$'])
+        && ty.name != "Result"
+    {
+        return ty.name == rust_use_name;
+    }
+    rust_use_name_for_source_type(ty) == rust_use_name
+}
+
 fn collect_type_rust_use_name_matches<'a>(
     ty: &'a TypeDecl,
     program: &'a Program,
     rust_use_name: &str,
     matches: &mut Vec<(&'a TypeDecl, &'a Program)>,
 ) {
-    if rust_use_name_for_source_type(ty) == rust_use_name {
+    if source_type_rust_use_name_matches(ty, rust_use_name) {
         matches.push((ty, program));
     }
     for member in &ty.members {
@@ -53855,13 +53869,15 @@ fn context_type_simple_name_is_ambiguous(program: &Program, type_name: &str) -> 
     let simple = erased_java_simple_name(type_name);
     let mut matches = BTreeSet::new();
     for ty in &program.types {
-        for candidate in type_decl_and_nested_types(ty) {
-            if erased_java_simple_name(&candidate.name) == simple {
+        let mut ambiguous = false;
+        visit_type_decl_and_nested(ty, &mut |candidate| {
+            if !ambiguous && erased_java_simple_name(&candidate.name) == simple {
                 matches.insert(candidate.name.clone());
-                if matches.len() > 1 {
-                    return true;
-                }
+                ambiguous = matches.len() > 1;
             }
+        });
+        if ambiguous {
+            return true;
         }
     }
     false
@@ -53904,13 +53920,15 @@ fn context_type_simple_name_is_ambiguous_in_lower_ctx(ctx: LowerCtx, type_name: 
         ctx.source_summary_type_program,
     ] {
         for ty in &program.types {
-            for candidate in type_decl_and_nested_types(ty) {
-                if erased_java_simple_name(&candidate.name) == simple {
+            let mut ambiguous = false;
+            visit_type_decl_and_nested(ty, &mut |candidate| {
+                if !ambiguous && erased_java_simple_name(&candidate.name) == simple {
                     matches.insert(candidate.name.clone());
-                    if matches.len() > 1 {
-                        return true;
-                    }
+                    ambiguous = matches.len() > 1;
                 }
+            });
+            if ambiguous {
+                return true;
             }
         }
     }
@@ -53985,11 +54003,11 @@ fn unique_context_type_decl_by_simple_name_in_program<'a>(
 ) -> Option<&'a TypeDecl> {
     let mut matches = Vec::new();
     for ty in &program.types {
-        for candidate in type_decl_and_nested_types(ty) {
+        visit_type_decl_and_nested(ty, &mut |candidate| {
             if erased_java_simple_name(&candidate.name) == simple {
                 matches.push(candidate);
             }
-        }
+        });
     }
     unique_context_type_match(matches.as_slice())
 }
@@ -54003,6 +54021,17 @@ fn unique_context_type_match<'a>(matches: &[&'a TypeDecl]) -> Option<&'a TypeDec
         Some(first)
     } else {
         None
+    }
+}
+
+/// Visits `ty` and its nested types in the same depth-first order as
+/// `type_decl_and_nested_types`, without allocating a vector per call.
+fn visit_type_decl_and_nested<'a>(ty: &'a TypeDecl, visit: &mut impl FnMut(&'a TypeDecl)) {
+    visit(ty);
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            visit_type_decl_and_nested(nested, visit);
+        }
     }
 }
 
@@ -88741,14 +88770,20 @@ fn lower_shared_storage_field_access_plain(
     // `Option<Rc<RefCell<T>>>` / `Option<Arc<Mutex<T>>>` is a nullable Java
     // reference.  It must be checked before asking the handle for a borrow;
     // otherwise generated Rust tries to call `.borrow()` on `Option`.
-    let lowered_receiver = if receiver_shape.optional_element_type().is_some() {
-        make_java_null_expect_catchable_in_propagating_ctx(
-            project_optional_receiver(lowered_receiver, OptionalReceiverProjection::Shared),
-            ctx,
-        )
-    } else {
-        lowered_receiver
-    };
+    // A local refined non-null in this scope already lowers to its unwrapped
+    // value (`lower_refined_non_null_var`); a second Option projection would
+    // dereference the payload as an Option.
+    let refined_non_null =
+        matches!(receiver, Expr::Var(name) if refinements.non_null_locals.contains(name));
+    let lowered_receiver =
+        if receiver_shape.optional_element_type().is_some() && !refined_non_null {
+            make_java_null_expect_catchable_in_propagating_ctx(
+                project_optional_receiver(lowered_receiver, OptionalReceiverProjection::Shared),
+                ctx,
+            )
+        } else {
+            lowered_receiver
+        };
     Some(scoped_shared_storage_field_read(
         lowered_receiver,
         &crate::parser::to_snake_case(accessor_member_name(field)),

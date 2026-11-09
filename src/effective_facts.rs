@@ -17,6 +17,7 @@ struct TypeFactLookupSession {
     facts_address: usize,
     capabilities: Option<crate::facts::ExternalTypeNameLookupIndex>,
     hierarchy: Option<crate::facts::ExternalTypeNameLookupIndex>,
+    closed_hierarchy: Option<crate::facts::ExternalTypeNameLookupIndex>,
     parsed_source_names: Option<std::collections::HashSet<String>>,
 }
 
@@ -54,6 +55,7 @@ pub(crate) fn with_type_fact_lookup_session<R>(facts: &FactSet, f: impl FnOnce()
 enum TypeFactKind {
     Capabilities,
     Hierarchy,
+    ClosedHierarchy,
 }
 
 struct TypeFactCandidates {
@@ -96,6 +98,14 @@ fn type_fact_candidates(facts: &FactSet, kind: TypeFactKind, name: &str) -> Type
                         .map(|fact| fact.type_name.as_str()),
                 )
             }),
+            TypeFactKind::ClosedHierarchy => session.closed_hierarchy.get_or_insert_with(|| {
+                crate::facts::ExternalTypeNameLookupIndex::new(
+                    facts
+                        .closed_hierarchy_facts
+                        .iter()
+                        .map(|fact| fact.type_name.as_str()),
+                )
+            }),
         };
         Some(index.matching_indices(name))
     });
@@ -103,6 +113,7 @@ fn type_fact_candidates(facts: &FactSet, kind: TypeFactKind, name: &str) -> Type
         || match kind {
             TypeFactKind::Capabilities => facts.type_capability_overrides.len(),
             TypeFactKind::Hierarchy => facts.hierarchy_overrides.len(),
+            TypeFactKind::ClosedHierarchy => facts.closed_hierarchy_facts.len(),
         },
         |indices| indices.len(),
     );
@@ -499,9 +510,10 @@ impl<'a> EffectiveFacts<'a> {
         &self,
         type_name: &str,
     ) -> Option<EffectiveFact<bool>> {
-        self.facts
-            .closed_hierarchy_facts
-            .iter()
+        // Candidates come back in fact order, so ties keep the same winner as
+        // the full scan this replaces.
+        type_fact_candidates(self.facts, TypeFactKind::ClosedHierarchy, type_name)
+            .map(|index| &self.facts.closed_hierarchy_facts[index])
             .filter(|fact| type_name_matches(&fact.type_name, type_name))
             .map(|fact| EffectiveFact::new(fact.closed, fact.provenance))
             .max_by_key(effective_fact_precedence_key)

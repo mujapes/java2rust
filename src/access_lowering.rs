@@ -144,12 +144,50 @@ pub(crate) fn lower_field_access_with_facts(
             &plan,
             lowered_receiver,
         );
-        apply_member_access_plan(&plan, lowered_receiver)
+        let projected = apply_member_access_plan(&plan, lowered_receiver);
+        if shared_plain_field_read_needs_clone(receiver, field, type_env, facts) {
+            crate::coercion::receiver_method_call_projection_exact(projected, "clone", Vec::new())
+        } else {
+            projected
+        }
     } else {
+        let needs_clone = shared_plain_field_read_needs_clone(receiver, field, type_env, facts);
         let lowered_receiver =
             lower_nullable_array_element_field_receiver(receiver, type_env, lowered_receiver);
-        field_projection(lowered_receiver, field)
+        let projected = field_projection(lowered_receiver, field);
+        if needs_clone {
+            // Java reads a reference field by copying the reference. A plain
+            // Rc/Arc receiver cannot give up a non-Copy field by move.
+            crate::coercion::receiver_method_call_projection_exact(projected, "clone", Vec::new())
+        } else {
+            projected
+        }
     }
+}
+
+/// Plain shared handles (Rc/Arc without interior mutability) cannot move a
+/// non-Copy field out. Interior-mutable handles already borrow through their
+/// own accessor, and primitive fields copy.
+fn shared_plain_field_read_needs_clone(
+    receiver: &Expr,
+    field: &str,
+    type_env: &TypeEnv,
+    facts: &crate::facts::FactSet,
+) -> bool {
+    let crate::java_ir::JavaType::Named { name, .. } =
+        crate::types::infer_expr_type(receiver, type_env)
+    else {
+        return false;
+    };
+    let placement = facts.storage_placement_for(&name);
+    if !placement.shared() || placement.interior_mutable() {
+        return false;
+    }
+    let field_expr = Expr::FieldAccess(Box::new(receiver.clone()), field.into());
+    !matches!(
+        crate::types::infer_expr_type(&field_expr, type_env),
+        crate::java_ir::JavaType::Primitive(_)
+    )
 }
 
 fn lower_shared_local_field_access(

@@ -136,6 +136,8 @@ pub struct ExternalFactLookupIndex<'a> {
     facts: &'a FactSet,
     external_api_by_method_alias: RefCell<Option<HashMap<String, Vec<usize>>>>,
     external_api_candidates_by_query: RefCell<HashMap<String, Rc<[usize]>>>,
+    // Stores pack indices, not references, so the index keeps its covariant lifetime.
+    external_pack_by_member_type: RefCell<HashMap<String, Option<usize>>>,
     external_field_by_name_alias: RefCell<Option<HashMap<String, Vec<usize>>>>,
     external_field_value_by_name_alias: RefCell<Option<HashMap<String, Vec<usize>>>>,
 }
@@ -176,6 +178,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
             facts,
             external_api_by_method_alias: RefCell::new(None),
             external_api_candidates_by_query: RefCell::new(HashMap::new()),
+            external_pack_by_member_type: RefCell::new(HashMap::new()),
             external_field_by_name_alias: RefCell::new(None),
             external_field_value_by_name_alias: RefCell::new(None),
         }
@@ -918,6 +921,29 @@ impl<'a> ExternalFactLookupIndex<'a> {
     }
 
     fn external_pack_with_member_for_type(
+        &self,
+        type_name: &str,
+    ) -> Option<&'a ExternalLibraryPackFact> {
+        // Facts are immutable for the lifetime of this index, so the answer for
+        // a queried type never changes. Facade invariant planning asks the same
+        // names many times; memoize them instead of rescanning every pack.
+        if let Some(cached) = self.external_pack_by_member_type.borrow().get(type_name) {
+            return cached.map(|index| &self.facts.external_library_packs[index]);
+        }
+        let found = self.external_pack_with_member_for_type_uncached(type_name);
+        let index = found.and_then(|pack| {
+            self.facts
+                .external_library_packs
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, pack))
+        });
+        self.external_pack_by_member_type
+            .borrow_mut()
+            .insert(type_name.to_string(), index);
+        found
+    }
+
+    fn external_pack_with_member_for_type_uncached(
         &self,
         type_name: &str,
     ) -> Option<&'a ExternalLibraryPackFact> {

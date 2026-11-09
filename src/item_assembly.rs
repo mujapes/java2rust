@@ -12931,8 +12931,33 @@ pub(crate) fn static_final_field_has_associated_const(ty: &TypeDecl, field: &Fie
     if !is_static_final_field(field) {
         return false;
     }
-    let const_infos = static_final_const_infos(ty);
+    let const_infos = cached_static_final_const_infos(ty);
     associated_const_for_field(field, &field.name, &const_infos, None).is_some()
+}
+
+thread_local! {
+    // Keyed by the type's identity inside the current lowering. Lowering clears
+    // the cache on entry, so a freed program's address is never reused.
+    static STATIC_FINAL_CONST_INFO_CACHE: std::cell::RefCell<
+        std::collections::HashMap<(String, usize, usize), std::rc::Rc<Vec<StaticFinalConstInfo>>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Drop memoized static-final constant tables. Call before lowering a program.
+pub(crate) fn clear_static_final_const_info_cache() {
+    STATIC_FINAL_CONST_INFO_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+/// Per-method field checks previously rebuilt the whole type's constant table
+/// for every field, which is quadratic in the number of static finals.
+fn cached_static_final_const_infos(ty: &TypeDecl) -> std::rc::Rc<Vec<StaticFinalConstInfo>> {
+    let key = (ty.name.clone(), ty.members.as_ptr() as usize, ty.members.len());
+    if let Some(cached) = STATIC_FINAL_CONST_INFO_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        return cached;
+    }
+    let infos = std::rc::Rc::new(static_final_const_infos(ty));
+    STATIC_FINAL_CONST_INFO_CACHE.with(|cache| cache.borrow_mut().insert(key, infos.clone()));
+    infos
 }
 
 #[derive(Debug, Clone)]
