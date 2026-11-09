@@ -4777,6 +4777,7 @@ const JAVA_SQL_OWNED_TYPES: &[&str] = &[
 const ANDROID_OWNED_TYPES: &[&str] = &[
     "android.view.View",
     "android.widget.TextView",
+    "android.widget.ImageView",
     "android.content.Context",
     "android.content.res.Resources",
     "android.view.LayoutInflater",

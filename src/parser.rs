@@ -122,6 +122,7 @@ struct JavaSqlImports {
     driver_manager: bool,
     optional: bool,
     android_context: bool,
+    android_image_view: bool,
 }
 
 impl JavaSqlImports {
@@ -139,6 +140,7 @@ impl JavaSqlImports {
                 driver_manager: true,
                 optional: self.optional,
                 android_context: self.android_context,
+                android_image_view: self.android_image_view,
             }
         } else {
             self
@@ -155,6 +157,7 @@ impl JavaSqlImports {
                 "DriverManager" => scoped.driver_manager = false,
                 "Optional" => scoped.optional = false,
                 "Context" => scoped.android_context = false,
+                "ImageView" => scoped.android_image_view = false,
                 _ => {}
             }
         }
@@ -182,6 +185,7 @@ impl JavaSqlImports {
                 "j$.util.Optional" | "java.util.Optional" => imported.optional = true,
                 // The android-framework pack owns this type under its qualified name.
                 "android.content.Context" => imported.android_context = true,
+                "android.widget.ImageView" => imported.android_image_view = true,
                 _ => {}
             }
         }
@@ -200,6 +204,7 @@ impl JavaSqlImports {
             && !self.driver_manager
             && !self.optional
             && !self.android_context
+            && !self.android_image_view
     }
 
     fn qualify(self, name: &str) -> Option<&'static str> {
@@ -222,6 +227,7 @@ impl JavaSqlImports {
             }
             "Optional" if self.optional => Some("j$.util.Optional"),
             "Context" if self.android_context => Some("android.content.Context"),
+            "ImageView" if self.android_image_view => Some("android.widget.ImageView"),
             _ => None,
         }
     }
