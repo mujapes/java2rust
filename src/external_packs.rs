@@ -4780,6 +4780,7 @@ const ANDROID_OWNED_TYPES: &[&str] = &[
     "android.content.Context",
     "android.content.res.Resources",
     "android.view.LayoutInflater",
+    "android.view.ViewGroup",
 ];
 
 // Platform calls the sign-in closure makes (android-bridge-spec.json). Each
