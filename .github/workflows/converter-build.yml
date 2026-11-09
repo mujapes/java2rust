@@ -5,7 +5,7 @@ on:
     branches: [ci-converter-build]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -13,5 +13,5 @@ jobs:
       - run: cargo build --release --locked
       - uses: actions/upload-artifact@v4
         with:
-          name: new-java2rust-linux-x86_64
+          name: new-java2rust-linux-aarch64
           path: target/release/new-java2rust
