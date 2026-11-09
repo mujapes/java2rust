@@ -2509,19 +2509,9 @@ fn seed_typed_external_call_effects_for_expected_type(
                 false,
             );
         }
-        Expr::Cast { expr: inner, .. } => seed_typed_external_call_effects_for_expected_type(
-            inner,
-            expected_return_type,
-            facts,
-            seen,
-            budget,
-            enable_builtin_external_packs,
-            guessed_count,
-            budget_exhausted,
-            env,
-            current_type,
-            allow_named_return_type,
-        ),
+        // A cast's target type is what the cast yields, not the return type of the wrapped
+        // call; do not seed the inner call from the outer expected type.
+        Expr::Cast { .. } => {}
         Expr::Ternary {
             then_expr,
             else_expr,
