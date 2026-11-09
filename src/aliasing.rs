@@ -325,12 +325,32 @@ fn source_map_entry_alias_mutation_is_represented(
     placement.shared() && placement.interior_mutable() && !placement.sync()
 }
 
+fn native_throwable_suppressed_alias_is_represented(alias: &ObservableAlias, facts: &FactSet) -> bool {
+    if !matches!(alias.mutation(), MutationKind::MutatingCall { method } if matches!(method.as_str(), "addSuppressed" | "add_suppressed")) {
+        return false;
+    }
+    let effective = crate::effective_facts::EffectiveFacts::new(facts);
+    let native = |ty: &JavaType| {
+        let ty = crate::types::optional_element_type(ty).unwrap_or_else(|| ty.clone());
+        matches!(ty, JavaType::Named { ref name, .. }
+            if (!name.contains('.') || name.starts_with("java."))
+            && crate::stdlib::is_known_throwable_carrier_type(name)
+            && effective.allows_platform_hierarchy_fallback(name))
+    };
+    native(alias.aliased_ty()) && alias.original_ty.as_ref().is_some_and(native)
+}
+
 fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &FactSet) -> bool {
     if !matches!(
         alias.mutation(),
         MutationKind::FieldWrite { .. } | MutationKind::MutatingCall { .. }
     ) {
         return false;
+    }
+    // JavaException clones retain allocation identity and share suppressed state.
+    // This proves only the mapped addSuppressed mutation, not arbitrary fields/APIs.
+    if native_throwable_suppressed_alias_is_represented(alias, facts) {
+        return true;
     }
     let effective = crate::effective_facts::EffectiveFacts::new(facts);
     if effective.native_shared_reference_carrier(alias.aliased_ty())
@@ -1680,6 +1700,27 @@ mod tests {
     use super::*;
     use crate::facts::{ExternalApiEffectFact, ExternalApiRole, FactProvenance, NullabilityState};
     use crate::parser::parse_java_source;
+
+    #[test]
+    fn native_throwable_suppressed_alias_requires_proven_carrier_and_mutation() {
+        let alias = |name: &str, mutation| ObservableAlias::new(
+            "Probe.run".into(), "value".into(), "alias".into(), "alias".into(), "value".into(),
+            crate::parser::parse_hierarchy_type(name), Some(crate::parser::parse_hierarchy_type(name)), false, mutation);
+        let mutation = || MutationKind::MutatingCall { method: "addSuppressed".into() };
+        for name in ["Exception", "java.lang.Exception", "IOException"] {
+            assert!(native_throwable_suppressed_alias_is_represented(&alias(name, mutation()), &FactSet::default()));
+        }
+        for name in ["Object", "Cell", "other.Exception"] {
+            assert!(!native_throwable_suppressed_alias_is_represented(&alias(name, mutation()), &FactSet::default()));
+        }
+        assert!(!native_throwable_suppressed_alias_is_represented(&alias("Exception", MutationKind::FieldWrite { field: "value".into() }), &FactSet::default()));
+        assert!(!native_throwable_suppressed_alias_is_represented(&alias("Exception", MutationKind::MutatingCall { method: "initCause".into() }), &FactSet::default()));
+        let parsed = parse_java_source("class Exception { int value; }");
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        assert!(!native_throwable_suppressed_alias_is_represented(&alias("Exception", mutation()), &semantic.facts));
+        assert!(native_throwable_suppressed_alias_is_represented(&alias("java.lang.Exception", mutation()), &semantic.facts));
+    }
 
     #[test]
     fn stored_reference_alias_does_not_alias_the_containing_object() {

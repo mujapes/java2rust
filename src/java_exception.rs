@@ -1,14 +1,23 @@
 // Java exception state and logical message API. The producer selects the
 // text alias and explicit formatter adapter; no scalar projection lives here.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct JavaException {
+    allocation_identity: std::sync::Arc<()>,
     class_name: &'static str,
     binary_name: &'static str,
     message: Option<JavaExceptionText>,
     cause: Option<std::boxed::Box<JavaException>>,
-    suppressed: Vec<JavaException>,
+    suppressed: std::sync::Arc<std::sync::Mutex<Vec<JavaException>>>,
     null_callback_receiver: bool,
 }
+
+// Throwable inherits Object reference equality; equal text is not equal allocation.
+impl PartialEq for JavaException {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.allocation_identity, &other.allocation_identity)
+    }
+}
+impl Eq for JavaException {}
 
 impl JavaAppendValue for JavaException {
     fn into_java_append_string(self) -> JavaUtf16 {
@@ -32,7 +41,7 @@ impl std::fmt::Debug for JavaException {
             .field("text", &format_args!("{}", self))
             .field("message", &self.message)
             .field("cause", &self.cause)
-            .field("suppressed", &self.suppressed)
+            .field("suppressed", &*self.suppressed.lock().expect("Java suppressed exceptions mutex poisoned"))
             .field("null_callback_receiver", &self.null_callback_receiver)
             .finish()
     }
@@ -49,11 +58,12 @@ impl JavaException {
         cause: Option<JavaException>,
     ) -> JavaException {
         JavaException {
+            allocation_identity: std::sync::Arc::new(()),
             class_name,
             binary_name: java_exception_runtime_name(class_name),
             message,
             cause: cause.map(std::boxed::Box::new),
-            suppressed: Vec::new(),
+            suppressed: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             null_callback_receiver: false,
         }
     }
@@ -138,11 +148,12 @@ impl JavaException {
         cause: JavaException,
     ) -> JavaException {
         JavaException {
+            allocation_identity: std::sync::Arc::new(()),
             class_name,
             binary_name: java_exception_runtime_name(class_name),
             message: Some(message.into()),
             cause: Some(std::boxed::Box::new(cause)),
-            suppressed: Vec::new(),
+            suppressed: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             null_callback_receiver: false,
         }
     }
@@ -201,11 +212,11 @@ impl JavaException {
     }
 
     pub fn add_suppressed(&mut self, exception: JavaException) {
-        self.suppressed.push(exception);
+        self.suppressed.lock().expect("Java suppressed exceptions mutex poisoned").push(exception);
     }
 
     pub fn get_suppressed(&self) -> Vec<Option<JavaException>> {
-        self.suppressed.iter().cloned().map(Some).collect()
+        self.suppressed.lock().expect("Java suppressed exceptions mutex poisoned").iter().cloned().map(Some).collect()
     }
 
     pub fn get_class(&self) -> JavaClass<()> {

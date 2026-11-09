@@ -1577,7 +1577,20 @@ fn translate_parsed_source_with_context(
     external_facts: &FactSet,
 ) -> Translation {
     let source_program = source_program_context.as_ref().unwrap_or(&parsed.program);
-    let source_symbols = resolve::source_symbols_from_program(source_program);
+    // Summary-declared classes are source owners too. Without them in the symbol
+    // table, a referenced summary class resolves as external and gets an
+    // unmodelled facade with a CamelCased name instead of its source name.
+    let merged_symbol_program;
+    let symbol_source_program: &Program = match &summary_program_context {
+        Some(summary) => {
+            let mut merged = source_program.clone();
+            merge_program_context(&mut merged, summary.clone());
+            merged_symbol_program = merged;
+            &merged_symbol_program
+        }
+        None => source_program,
+    };
+    let source_symbols = resolve::source_symbols_from_program(symbol_source_program);
     if let Some(summary) = &mut summary_program_context {
         source_symbols.normalize_type_parameters(summary);
     }

@@ -20400,6 +20400,12 @@ impl<'a> SourceReturnNullabilityContext<'a> {
         let receiver_ty = receiver
             .as_deref()
             .and_then(|receiver| self.java_type_for_expr(receiver));
+        // An external static owner may have no source declaration or binding.
+        // Preserve its qualified name for producer facts, but never reinterpret
+        // a local/parameter with the same spelling as a static type owner.
+        let static_owner = receiver.as_deref().and_then(static_initializer_receiver_java_name)
+            .filter(|owner| !self.binding_types.contains_key(owner.split('.').next().unwrap_or(owner)))
+            .map(|owner| crate::stdlib::canonical_external_receiver_type_key(&owner));
         let receiver_key = resolved
             .as_ref()
             .map(|call| call.declaring_type.as_str())
@@ -20407,7 +20413,8 @@ impl<'a> SourceReturnNullabilityContext<'a> {
                 receiver_ty
                     .as_ref()
                     .and_then(java_type_name_for_signature_dispatch)
-            });
+            })
+            .or(static_owner.as_deref());
         if receiver_key.as_ref().is_some_and(|name| {
             EffectiveFacts::new(self.facts).parsed_source_controls_native_carrier(
                 &JavaType::Named {
@@ -21910,6 +21917,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             if let (Some(binding), Some(initializer)) = (binding, initializer)
                 && let Some(state) = source_expr_nullability_state(initializer).or_else(|| {
                     ctx.and_then(|ctx| ctx.field_nullability_for_expr(initializer, scopes))
+                        .or_else(|| ctx.and_then(|ctx| ctx.external_call_nullability_state(initializer)))
                 })
             {
                 merge_binding_nullability_state_by_id(states, binding, state);
@@ -21919,6 +21927,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 && let Some(state) =
                     source_return_direct_nullability_state(initializer).or_else(|| {
                         ctx.and_then(|ctx| ctx.field_nullability_for_expr(initializer, scopes))
+                        .or_else(|| ctx.and_then(|ctx| ctx.external_call_nullability_state(initializer)))
                     })
             {
                 merge_binding_nullability_state_by_id(return_states, binding, state);
@@ -21939,7 +21948,8 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             if let Expr::Var(name) = target
                 && let Some(binding) = scoped_binding(scopes, name).cloned()
                 && let Some(state) = source_expr_nullability_state(value)
-                    .or_else(|| ctx.and_then(|ctx| ctx.field_nullability_for_expr(value, scopes)))
+                    .or_else(|| ctx.and_then(|ctx| ctx.field_nullability_for_expr(value, scopes))
+                        .or_else(|| ctx.and_then(|ctx| ctx.external_call_nullability_state(value))))
             {
                 merge_binding_nullability_state_by_id(states, &binding, state);
                 merge_binding_nullability_state_by_id(return_states, &binding, state);
@@ -21947,7 +21957,8 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             if let Expr::Var(name) = target
                 && let Some(binding) = scoped_binding(scopes, name).cloned()
                 && let Some(state) = source_return_direct_nullability_state(value)
-                    .or_else(|| ctx.and_then(|ctx| ctx.field_nullability_for_expr(value, scopes)))
+                    .or_else(|| ctx.and_then(|ctx| ctx.field_nullability_for_expr(value, scopes))
+                        .or_else(|| ctx.and_then(|ctx| ctx.external_call_nullability_state(value))))
             {
                 merge_binding_nullability_state_by_id(return_states, &binding, state);
             }
@@ -25969,6 +25980,55 @@ class NativeAllocationFlow {
     }
 
     #[test]
+    fn external_static_return_owner_preserves_nullable_contract_without_source_type() {
+        let parsed = crate::parser::parse_java_source(
+            "class Caller { Value direct() { return provider.find(); } Value local() { Value v = provider.find(); return v; } Value assigned() { Value v; v = provider.find(); return v; } Value qualified() { return dep.provider.find(); } Value present() { return provider.present(); } Value unknown() { return missing.find(); } Value shadow(Object provider) { return provider.find(); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = crate::external_facts::parse_external_facts(
+            "external-api find provider getter read-only maybe-null args=0 return=Value\nexternal-api find dep.provider getter read-only maybe-null args=0 return=Value\nexternal-api present provider getter read-only non-null args=0 return=Value\n",
+        );
+        let owner = &resolved.program.types[0];
+        for member in &owner.members {
+            let Member::Method(method) = member else { continue; };
+            let constraints = typed_source_method_return_nullability_constraints(owner, method, facts.facts());
+            let nullable = SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull);
+            match method.name.as_str() {
+                "direct" | "local" | "assigned" | "qualified" => assert!(constraints.contains(&nullable), "{}: {:?}",method.name,constraints),
+                "present" => assert!(constraints.contains(&SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull))),
+                "unknown" | "shadow" => assert!(!constraints.contains(&nullable), "{}: {:?}",method.name,constraints),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn native_bodyless_return_contract_preserves_nullable_and_nonnull() {
+        let parsed = crate::parser::parse_java_source(
+            "class Provider { native Object find(); native int count(); Object actual() { return new Object(); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let owner = &resolved.program.types[0];
+        let find = owner.members.iter().find_map(|member| match member {
+            Member::Method(method) if method.name == "find" => Some(method), _ => None,
+        }).unwrap();
+        for (contract, expected) in [("maybe-null", NullabilityState::MaybeNull), ("non-null", NullabilityState::DefinitelyNonNull)] {
+            let parsed = crate::external_facts::parse_external_facts(&format!(
+                "external-api find Provider unknown unknown {contract} args=0 return=Object\n"
+            ));
+            let constraints = method_return_shape_constraints(owner, find, &UsageFacts::default(), parsed.facts());
+            assert_eq!(constraints, vec![SignatureConstraint::RequiredStorageNullability(expected)]);
+        }
+        let constraints = method_return_shape_constraints(owner, find, &UsageFacts::default(), &FactSet::default());
+        assert_eq!(constraints, vec![SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull)]);
+        let count = owner.members.iter().find_map(|member| match member {
+            Member::Method(method) if method.name == "count" => Some(method), _ => None,
+        }).unwrap();
+        assert!(!method_return_shape_constraints(owner, count, &UsageFacts::default(), &FactSet::default())
+            .contains(&SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull)));
+    }
+
+    #[test]
     fn map_entry_accessor_returned_from_source_helper_stays_nullable() {
         let parsed = crate::parser::parse_java_source(
             "class Caller { static Integer bump(java.util.Map.Entry<String, Integer> entry) { return entry.setValue(10); } }",
@@ -28940,6 +29000,19 @@ class PublicMapLookup {
                 )
             );
         }
+    }
+
+    #[test]
+    fn local_storage_nullable_contract_wins_over_guarded_non_null_use() {
+        let non_null = SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull);
+        let nullable = SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull);
+        let null = SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNull);
+        assert!(local_storage_proves_non_null(&[non_null.clone()]));
+        assert!(!local_storage_proves_non_null(&[]));
+        assert!(!local_storage_proves_non_null(&[nullable.clone()]));
+        assert!(!local_storage_proves_non_null(&[non_null.clone(), nullable.clone()]));
+        assert!(!local_storage_proves_non_null(&[nullable, non_null.clone()]));
+        assert!(!local_storage_proves_non_null(&[non_null, null]));
     }
 
     #[test]
@@ -34232,8 +34305,10 @@ fn local_plan(
     type_param_scope: TypeParamScope<'_>,
 ) -> LocalPlan {
     let effective_facts = EffectiveFacts::new(facts);
-    let mut constraints =
-        local_constraints_without_stale_nullable_call_result(initializer, constraints).into_owned();
+    // Local storage must honor the joined nullability contract. A guarded
+    // use may add DefinitelyNonNull for one read; it cannot erase MaybeNull
+    // supplied by the initializer or another assignment.
+    let mut constraints = constraints.to_vec();
     normalize_declared_object_representation_local_constraints(
         &java_ty,
         representations,
@@ -34323,7 +34398,7 @@ fn local_plan(
         shape,
         signature_constraints_require_mutable_binding(&constraints),
     )
-    .with_proven_non_null(signature_constraints_prove_non_null_storage(&constraints))
+    .with_proven_non_null(local_storage_proves_non_null(&constraints))
 }
 
 fn normalize_declared_object_representation_local_constraints(
@@ -34374,30 +34449,9 @@ fn normalize_declared_object_representation_local_constraints(
     });
 }
 
-fn local_constraints_without_stale_nullable_call_result<'a>(
-    initializer: Option<&Expr>,
-    constraints: &'a [SignatureConstraint],
-) -> std::borrow::Cow<'a, [SignatureConstraint]> {
-    let Some(Expr::Call { .. }) = initializer else {
-        return std::borrow::Cow::Borrowed(constraints);
-    };
-    if !signature_constraints_prove_non_null_storage(constraints) {
-        return std::borrow::Cow::Borrowed(constraints);
-    }
-    std::borrow::Cow::Owned(
-        constraints
-            .iter()
-            .filter(|constraint| {
-                !matches!(
-                    constraint,
-                    SignatureConstraint::RequiredStorageNullability(
-                        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
-                    )
-                )
-            })
-            .cloned()
-            .collect(),
-    )
+fn local_storage_proves_non_null(constraints: &[SignatureConstraint]) -> bool {
+    !constraints_require_nullable_storage(constraints)
+        && signature_constraints_prove_non_null_storage(constraints)
 }
 
 fn declared_typed_initializer_should_anchor_local_type(
@@ -37313,6 +37367,21 @@ fn method_return_shape_constraints_with_declared_source_types(
     facts: &FactSet,
     declared_source_types: &HashSet<String>,
 ) -> Vec<SignatureConstraint> {
+    // A native declaration supplies no body proving a non-null reference.
+    // Keep its producer slot nullable unless an explicit ABI contract says otherwise.
+    if method.body.is_none()
+        && method.modifiers.contains(&Modifier::Native)
+        && method_return_type_param_name(method).is_none()
+        && matches!(method.return_type, JavaType::String | JavaType::Array(_) | JavaType::Named { .. })
+    {
+        let state = facts.external_api_effect_for_receiver_with_arity(
+            Some(&ty.name), &method.name, Some(method.params.len()),
+        ).filter(|effect| external_effect_return_nullability_is_signature_evidence(effect)
+            && effect.return_nullability != NullabilityState::Unknown)
+         .map(|effect| effect.return_nullability)
+         .unwrap_or(NullabilityState::MaybeNull);
+        return vec![SignatureConstraint::RequiredStorageNullability(state)];
+    }
     if method.body.is_none()
         && !method.modifiers.contains(&Modifier::Abstract)
         && method_return_type_param_name(method).is_none()

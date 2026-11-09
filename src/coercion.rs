@@ -17954,7 +17954,10 @@ fn apply_erased_object_downcast(
     }
     let target_type = normalize_emitted_java_type_name(target_type);
     if !plausible_rust_nominal_type_name(&target_type) {
-        return expr;
+        return crate::unsupported::compile_error_expr_consuming(
+            &expr,
+            &format!("unsupported Java checked cast: invalid nominal Rust target {target_type}"),
+        );
     }
     match invalid_cast {
         // Parenthesised: `.` binds tighter than unary `*`, so an appended field
@@ -18136,13 +18139,15 @@ fn plausible_rust_nominal_type_name(target_type: &str) -> bool {
         .map(|(_, inner)| inner.trim_end_matches('>'))
         .unwrap_or(target_type);
     let innermost = innermost.rsplit("::").next().unwrap_or(innermost);
-    matches!(
-        innermost,
-        "bool" | "i8" | "i16" | "char" | "i32" | "i64" | "f32" | "f64"
-    ) || innermost
-        .chars()
-        .next()
-        .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+    // Java permits lowercase class names, which are common in obfuscated APKs.
+    // Naming style is not evidence that a checked cast can be omitted.
+    let identifier = innermost.strip_prefix("r#").unwrap_or(innermost);
+    if matches!(identifier, "dyn" | "impl" | "self" | "Self" | "super" | "crate") {
+        return false;
+    }
+    let mut chars = identifier.chars();
+    chars.next().is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn apply_to_owned_sequence(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
@@ -18506,6 +18511,10 @@ mod nominal_downcast_target_tests {
             "crate::Foo",
             "_Anon",
             "i32",
+            "cd",
+            "crate::defpackage::cd",
+            "std::rc::Rc<cd>",
+            "r#type",
         ] {
             assert!(
                 plausible_rust_nominal_type_name(target),
@@ -18516,7 +18525,7 @@ mod nominal_downcast_target_tests {
 
     #[test]
     fn non_nominal_targets_are_still_rejected() {
-        for target in ["", "dyn", "&str", "(i32, i32)", "std::rc::Rc<dyn>"] {
+        for target in ["", "dyn", "&str", "(i32, i32)", "std::rc::Rc<dyn>", "123bad", "cd()", "self"] {
             assert!(
                 !plausible_rust_nominal_type_name(target),
                 "expected a non-nominal target: {target}"

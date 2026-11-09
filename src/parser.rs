@@ -112,8 +112,6 @@ fn qualify_java_sql_imported_types(types: &mut [TypeDecl], imports: &[ImportDecl
 #[derive(Debug, Clone, Copy, Default)]
 struct JavaSqlImports {
     wildcard: bool,
-    // java.util.Optional (or its D8 `j$.util` form) imported by simple name.
-    optional: bool,
     connection: bool,
     statement: bool,
     prepared_statement: bool,
@@ -122,6 +120,7 @@ struct JavaSqlImports {
     database_metadata: bool,
     sql_exception: bool,
     driver_manager: bool,
+    optional: bool,
 }
 
 impl JavaSqlImports {
@@ -129,7 +128,6 @@ impl JavaSqlImports {
         let mut scoped = if self.wildcard {
             Self {
                 wildcard: false,
-                optional: false,
                 connection: true,
                 statement: true,
                 prepared_statement: true,
@@ -138,13 +136,13 @@ impl JavaSqlImports {
                 database_metadata: true,
                 sql_exception: true,
                 driver_manager: true,
+                optional: self.optional,
             }
         } else {
             self
         };
         for name in names {
             match name {
-                "Optional" => scoped.optional = false,
                 "Connection" => scoped.connection = false,
                 "Statement" => scoped.statement = false,
                 "PreparedStatement" => scoped.prepared_statement = false,
@@ -153,6 +151,7 @@ impl JavaSqlImports {
                 "DatabaseMetaData" => scoped.database_metadata = false,
                 "SQLException" => scoped.sql_exception = false,
                 "DriverManager" => scoped.driver_manager = false,
+                "Optional" => scoped.optional = false,
                 _ => {}
             }
         }
@@ -167,7 +166,6 @@ impl JavaSqlImports {
                 continue;
             }
             match import.path.as_str() {
-                "java.util.Optional" | "j$.util.Optional" => imported.optional = true,
                 "java.sql.Connection" => imported.connection = true,
                 "java.sql.Statement" => imported.statement = true,
                 "java.sql.PreparedStatement" => imported.prepared_statement = true,
@@ -176,6 +174,9 @@ impl JavaSqlImports {
                 "java.sql.DatabaseMetaData" => imported.database_metadata = true,
                 "java.sql.SQLException" => imported.sql_exception = true,
                 "java.sql.DriverManager" => imported.driver_manager = true,
+                // D8 desugars java.util.Optional to j$.util.Optional in the dex the
+                // stubs come from; qualify to that spelling so both sides agree.
+                "j$.util.Optional" | "java.util.Optional" => imported.optional = true,
                 _ => {}
             }
         }
@@ -184,7 +185,6 @@ impl JavaSqlImports {
 
     fn is_empty(self) -> bool {
         !self.wildcard
-            && !self.optional
             && !self.connection
             && !self.statement
             && !self.prepared_statement
@@ -193,12 +193,11 @@ impl JavaSqlImports {
             && !self.database_metadata
             && !self.sql_exception
             && !self.driver_manager
+            && !self.optional
     }
 
     fn qualify(self, name: &str) -> Option<&'static str> {
         match name {
-            // Use the D8 spelling the external stubs carry (j$.util.Optional -> JUtilOptional).
-            "Optional" if self.optional => Some("j$.util.Optional"),
             "Connection" if self.wildcard || self.connection => Some("java.sql.Connection"),
             "Statement" if self.wildcard || self.statement => Some("java.sql.Statement"),
             "PreparedStatement" if self.wildcard || self.prepared_statement => {
@@ -215,6 +214,7 @@ impl JavaSqlImports {
             "DriverManager" if self.wildcard || self.driver_manager => {
                 Some("java.sql.DriverManager")
             }
+            "Optional" if self.optional => Some("j$.util.Optional"),
             _ => None,
         }
     }

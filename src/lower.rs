@@ -2835,6 +2835,43 @@ fn static_storage_access_name_for_name(
     static_storage_access_name_for_owner(owner, semantic_name, env, ctx)
 }
 
+// Interface instance methods have a trait implementor as Self, whereas their
+// static fields belong to the declaring interface's single process-wide owner.
+fn interface_uses_static_carrier(ty: &TypeDecl, ctx: LowerCtx) -> bool {
+    ty.kind == TypeKind::Interface && !source_type_lowers_as_erased_object_alias(ty, ctx)
+}
+
+fn interface_static_carrier_name(ty: &TypeDecl) -> String {
+    format!("__JavaStatics{}", crate::java_naming::rust_name_for_java_named_type(&ty.name))
+}
+
+fn lower_interface_static_members(
+    file: &mut RustFile, program: &Program, ty: &TypeDecl, ctx: LowerCtx,
+) {
+    if !interface_uses_static_carrier(ty, ctx) {
+        return;
+    }
+    let owner = interface_static_carrier_name(ty);
+    file.items.push(RustItem::Raw(format!("pub struct {owner};")));
+    for item in static_storage_items_for_type(ty, ctx) {
+        file.items.push(RustItem::Raw(item));
+    }
+    let mut functions = ty.members.iter().filter_map(|member| match member {
+        Member::Method(method) if method.modifiers.contains(&Modifier::Static) =>
+            Some(lower_method(program, ty, method, ctx)),
+        _ => None,
+    }).collect::<Vec<_>>();
+    functions.extend(static_storage_accessor_functions_for_type(ty, ctx));
+    let associated_consts = crate::item_assembly::associated_consts_for_type(
+        ty, &associated_const_value_overrides_for_type(ty, ctx), ctx.support_local_type_program,
+    );
+    if !functions.is_empty() || !associated_consts.is_empty() {
+        file.items.push(RustItem::Impl(RustImpl {
+            target: owner, trait_name: None, associated_consts, functions,
+        }));
+    }
+}
+
 /// The Rust type name to qualify with, or `None` to use `Self`.
 fn static_storage_owner_qualifier(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> Option<String> {
     let current = ctx.current_type?;
@@ -2843,7 +2880,8 @@ fn static_storage_owner_qualifier(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> 
         lexical_source_field_decl(semantic_name, ctx)
         && field.modifiers.contains(&Modifier::Static)
     {
-        return (!declared_on_current || ctx.current_constructor.is_some())
+        return (!declared_on_current || ctx.current_constructor.is_some()
+            || interface_uses_static_carrier(owner_ty, ctx))
             .then(|| source_static_owner_use_name(owner_ty, ctx));
     }
     if SourceContextOwnerKey::new(current)
@@ -3199,6 +3237,7 @@ fn lower_type(
     }
     if let Some(item) = raw_interface_trait_item_with_default_methods(ty, program, ctx) {
         file.items.push(RustItem::Raw(item));
+        lower_interface_static_members(file, program, ty, ctx);
         return;
     }
 
@@ -3221,6 +3260,7 @@ fn lower_type(
             file.items.push(RustItem::Raw(bound_item));
         }
         file.items.push(RustItem::Raw(item));
+        lower_interface_static_members(file, program, ty, ctx);
         let erased_static_functions = erased_source_static_free_functions(program, ty, ctx);
         if !erased_static_functions.is_empty() {
             file.items
@@ -4741,42 +4781,8 @@ fn raw_interface_trait_item_with_default_methods(
             ctx,
         ));
     }
-    // Static interface utilities are not inherited virtual contracts.
-    for member in &ty.members {
-        if let Member::Method(method) = member
-            && method.modifiers.contains(&Modifier::Static)
-            && method.body.is_some()
-        {
-            let signature = trait_method_signature_with_receiver_and_return_shape(
-                ty,
-                method,
-                ctx.signatures,
-                ctx.facts,
-                trait_method_exception_plan(ty, method, program, ctx.exceptions),
-                trait_method_receiver_plan(
-                    ty,
-                    method,
-                    program,
-                    ctx.signatures,
-                    ctx.representations,
-                ),
-                trait_method_return_shape_plan(ty, method, program, ctx.signatures),
-                program,
-                ctx.representations,
-            );
-            methods.push(interface_default_trait_method_item(
-                ty,
-                ty,
-                method,
-                method,
-                &HashMap::new(),
-                &signature,
-                true,
-                program,
-                ctx,
-            ));
-        }
-    }
+    // Static utilities are emitted on the dedicated source static carrier;
+    // adding them to this trait would make its Java instance view non-object-safe.
     Some(
         crate::representation_lowering::source_interface_trait_item_with_surface(
             ty,
@@ -15027,6 +15033,16 @@ fn lower_delegated_constructor_trailing_stmt(
                 return vec![stmt];
             }
             let java_self_replacement = constructor_self_replacement(ctx);
+            if let Some(lowered) = lower_discarded_object_get_class(
+                expr, env, ctx, &ExprRefinements::default(),
+            ) {
+                let lowered = apply_result_propagation_policy(
+                    lowered, expr, env, ctx, returns_result,
+                );
+                return vec![expr_stmt(replace_self_receiver_with_replacement(
+                    lowered, &java_self_replacement,
+                ))];
+            }
             // Constructor trailing expressions are still ordinary Java
             // expression statements.  Route them through the same statement
             // planner as method bodies so native statement contracts (notably
@@ -19302,7 +19318,11 @@ fn lower_stmt(
             }
         }
         Stmt::Expr(expr) => {
-            if source_null_assertion_call_expr_stmt_is_noop(expr, env, ctx) {
+            if let Some(lowered) = lower_discarded_object_get_class(expr, env, ctx, refinements) {
+                out.push(expr_stmt(apply_result_propagation_policy(
+                    lowered, expr, env, ctx, wrap_returns_in_ok,
+                )));
+            } else if source_null_assertion_call_expr_stmt_is_noop(expr, env, ctx) {
                 return;
             } else if let Some(stmt) =
                 lower_unsupported_collection_view_mutation_expr_stmt(expr, env, ctx, refinements)
@@ -38782,7 +38802,9 @@ fn lower_lexical_static_constant(name: &str, ctx: LowerCtx) -> Option<RustExpr> 
             return None;
         }
         let member = static_const_reference_name_for_type(owner_ty, &field.name);
-        let value = if declared_on_current_type && ctx.current_constructor.is_none() {
+        let value = if declared_on_current_type && ctx.current_constructor.is_none()
+            && !interface_uses_static_carrier(owner_ty, ctx)
+        {
             self_associated_path_projection(&member)
         } else {
             owner_associated_path_projection(&source_static_owner_use_name(owner_ty, ctx), &member)
@@ -53257,6 +53279,16 @@ fn lower_constructor_argument_for_shape(
     shape: &RustSlotShape,
     ctx: LowerCtx,
 ) -> RustExpr {
+    // An escaping bare `this` must cross an owned Object constructor slot
+    // through the same allocation-preserving conversion as assignment/return.
+    // Generic argument lowering otherwise forwards self or a RefMut guard.
+    if matches!(arg, Expr::This)
+        && shape.ownership == OwnershipShape::Owned
+        && matches!(shape.dispatch, DispatchShape::ErasedObject)
+        && let Some(value) = lower_current_self_cast_for_slot(arg, &argument_slot(shape.clone()), ctx)
+    {
+        return value;
+    }
     if let Some(callback) = lower_native_sam_value_argument(arg, env, shape, ctx) {
         return callback;
     }
@@ -70535,6 +70567,12 @@ fn catalog_emitted_source_static_owner(
                 .map(|rust_owner| (target_owner, rust_owner))
         })
         .map(|(java_owner, rust_owner)| {
+            if let Some(owner_ty) = find_preferred_emitted_context_type_by_key(ctx, java_owner)
+                .or_else(|| SourceContextOwnerKey::new(java_owner).find_emitted_context_type(ctx))
+                && interface_uses_static_carrier(owner_ty, ctx)
+            {
+                return interface_static_carrier_name(owner_ty);
+            }
             // Keep the catalog's Java identity through rendering. A local
             // declaration lookup can be absent in a narrowed lowering frame;
             // that does not erase the already-planned owner binders.
@@ -70570,6 +70608,9 @@ fn catalog_emitted_source_static_owner(
 }
 
 fn source_static_owner_use_name(ty: &TypeDecl, ctx: LowerCtx) -> String {
+    if interface_uses_static_carrier(ty, ctx) {
+        return interface_static_carrier_name(ty);
+    }
     if ctx
         .representations
         .raw_generic_arguments_for(&ty.name)
@@ -112501,6 +112542,33 @@ fn source_method_returned_field_name(
     returned_field_name_from_expr(expr).map(str::to_string)
 }
 
+/// Object.getClass is final: when its value is discarded, only receiver
+/// evaluation and its null check are observable. Reuse the fully lowered
+/// receiver so side effects and catchable NPEs are retained exactly once.
+/// Borrow it rather than moving an owned local that Java still permits using.
+fn lower_discarded_object_get_class(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Call { receiver: Some(_), name, args, .. } = expr else {
+        return None;
+    };
+    // A user-defined Java get_class method is unrelated to final getClass.
+    if name != "getClass" || !args.is_empty() {
+        return None;
+    }
+    let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+    let RustExpr::MethodCall { receiver, method, args } = lowered.into_unshaped() else {
+        return None;
+    };
+    if method != "get_class" || !args.is_empty() {
+        return None;
+    }
+    Some(force_shared_borrow_projection(*receiver))
+}
+
 fn source_null_assertion_call_expr_stmt_is_noop(
     expr: &Expr,
     env: &ShapeEnv,
@@ -117849,6 +117917,14 @@ mod tests {
     use crate::parser::parse_java_source;
     use crate::rust_ir::RustExprShape;
     use crate::slot_shape::RustSlotShape;
+
+    #[test]
+    fn constructor_owned_erased_this_uses_retained_allocation_handle() {
+        let translated = crate::translate_source(include_str!("../tests/differential/EscapingThisCapture.java"));
+        assert!(!translated.rust.contains("CaptureHolder::new(__java_self.borrow_mut())"), "{}", translated.rust);
+        assert!(!translated.rust.contains("CaptureHolder::new(self)"), "{}", translated.rust);
+        assert!(translated.rust.contains("CaptureHolder::new(Box::new(std::clone::Clone::clone(&__java_self)) as Box<dyn std::any::Any>)"), "{}", translated.rust);
+    }
 
     #[test]
     fn deferred_plain_arraycopy_places_reject_later_mutations_and_calls() {

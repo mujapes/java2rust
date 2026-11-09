@@ -814,6 +814,17 @@ fn two_dimensional_array_element_type_after_optional(java_ty: &JavaType) -> Opti
 
 pub fn optional_element_type(java_ty: &JavaType) -> Option<JavaType> {
     match java_ty {
+        // Bytecode erases the payload of a bare Optional, so a raw Optional is
+        // Optional<Object>; this is the element type the lowered call sites use.
+        JavaType::Named { name, args }
+            if args.is_empty()
+                && matches!(name.as_str(), "Optional" | "java.util.Optional" | "j$.util.Optional") =>
+        {
+            Some(JavaType::Named {
+                name: "Object".to_string(),
+                args: Vec::new(),
+            })
+        }
         JavaType::Named { name, args } if args.is_empty() => {
             crate::stdlib::primitive_optional_payload(name).map(JavaType::Primitive)
         }

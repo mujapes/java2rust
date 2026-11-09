@@ -772,7 +772,7 @@ fn plan_canonical_equality_comparison(
     }
     match (left.optional_element_type(), right.optional_element_type()) {
         (Some(left_element), Some(right_element))
-            if java_types_match_for_equality(&left_element, &right_element) =>
+            if java_types_match_for_equality(&left_element, &right_element, facts) =>
         {
             if source == EqualityComparisonSource::EqualsCall
                 && let Some(custom_element) =
@@ -797,11 +797,11 @@ fn plan_canonical_equality_comparison(
             }
         }
         (Some(left_element), None)
-            if java_types_match_for_equality(&left_element, &right.java_ty) =>
+            if java_types_match_for_equality(&left_element, &right.java_ty, facts) =>
         {
             EqualityComparisonPlan::LeftOptionalByRef
         }
-        _ if java_types_match_for_equality(&left.java_ty, &right.java_ty)
+        _ if java_types_match_for_equality(&left.java_ty, &right.java_ty, facts)
             && left.ownership == OwnershipShape::SharedBorrow
             && right.ownership != OwnershipShape::SharedBorrow =>
         {
@@ -811,7 +811,7 @@ fn plan_canonical_equality_comparison(
     }
 }
 
-fn java_types_match_for_equality(left: &JavaType, right: &JavaType) -> bool {
+fn java_types_match_for_equality(left: &JavaType, right: &JavaType, facts: &FactSet) -> bool {
     if left == right {
         return true;
     }
@@ -821,8 +821,19 @@ fn java_types_match_for_equality(left: &JavaType, right: &JavaType) -> bool {
     let Some(right_name) = equality_java_type_name(right) else {
         return false;
     };
-    crate::stdlib::canonical_external_receiver_type_key(left_name)
-        == crate::stdlib::canonical_external_receiver_type_key(right_name)
+    // Native Throwable and its JDK subclasses have the SAME JavaException
+    // carrier. Optional projection must compare those carriers, not require
+    // nominally identical Java types (e.g. Throwable[] element vs Exception).
+    // Source-owned lookalikes/overrides must retain their own representation.
+    let effective = crate::effective_facts::EffectiveFacts::new(facts);
+    let native_throwable = |name: &str| {
+        (!name.contains('.') || name.starts_with("java."))
+            && crate::stdlib::is_known_throwable_carrier_type(name)
+            && effective.allows_platform_hierarchy_fallback(name)
+    };
+    (native_throwable(left_name) && native_throwable(right_name))
+        || crate::stdlib::canonical_external_receiver_type_key(left_name)
+            == crate::stdlib::canonical_external_receiver_type_key(right_name)
 }
 
 fn equality_java_type_name(java_ty: &JavaType) -> Option<&str> {
@@ -1473,6 +1484,21 @@ mod equality_symmetry_tests {
     /// maintains this law rather than deriving from it. Asserting the law is
     /// what turns "someone remembered to add the mirror arm" into something
     /// checked — the same reason `src/output_markers.rs` exists one level up.
+    #[test]
+    fn native_throwable_optional_comparison_preserves_physical_carrier() {
+        let left = shape(crate::types::optional_java_type(named("Throwable")), OwnershipShape::Owned, ViewShape::Native);
+        let right = shape(named("Exception"), OwnershipShape::Owned, ViewShape::Native);
+        let facts = FactSet::default();
+        assert_eq!(plan_equality_comparison_with_facts(&left, &right, &facts), EqualityComparisonPlan::LeftOptionalByRef);
+        assert_eq!(plan_equality_comparison_with_facts(&right, &left, &facts), EqualityComparisonPlan::RightOptionalByRef);
+        let unrelated = shape(named("other.Exception"), OwnershipShape::Owned, ViewShape::Native);
+        assert_eq!(plan_equality_comparison_with_facts(&left, &unrelated, &facts), EqualityComparisonPlan::Direct);
+        let parsed = crate::parser::parse_java_source("class Exception { int value; }");
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        assert_eq!(plan_equality_comparison_with_facts(&left, &right, &semantic.facts), EqualityComparisonPlan::Direct);
+    }
+
     #[test]
     fn equality_planning_is_symmetric_under_operand_swap() {
         let shapes = representative_shapes();
