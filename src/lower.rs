@@ -69876,6 +69876,9 @@ fn lower_explicit_external_facade_cast_receiver(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> Option<RustExpr> {
+    if std::env::var_os("J2R_DEBUG_CAST").is_some() {
+        eprintln!("J2R_DEBUG_CAST entry target_is_facade={} receiver_is_cast={}", matches!(target, CallTargetPlan::ExternalFacadeReceiver { .. }), matches!(receiver, Expr::Cast { .. }));
+    }
     if !matches!(target, CallTargetPlan::ExternalFacadeReceiver { .. }) {
         return None;
     }
