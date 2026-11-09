@@ -121,6 +121,7 @@ struct JavaSqlImports {
     sql_exception: bool,
     driver_manager: bool,
     optional: bool,
+    android_context: bool,
 }
 
 impl JavaSqlImports {
@@ -137,6 +138,7 @@ impl JavaSqlImports {
                 sql_exception: true,
                 driver_manager: true,
                 optional: self.optional,
+                android_context: self.android_context,
             }
         } else {
             self
@@ -152,6 +154,7 @@ impl JavaSqlImports {
                 "SQLException" => scoped.sql_exception = false,
                 "DriverManager" => scoped.driver_manager = false,
                 "Optional" => scoped.optional = false,
+                "Context" => scoped.android_context = false,
                 _ => {}
             }
         }
@@ -177,6 +180,8 @@ impl JavaSqlImports {
                 // D8 desugars java.util.Optional to j$.util.Optional in the dex the
                 // stubs come from; qualify to that spelling so both sides agree.
                 "j$.util.Optional" | "java.util.Optional" => imported.optional = true,
+                // The android-framework pack owns this type under its qualified name.
+                "android.content.Context" => imported.android_context = true,
                 _ => {}
             }
         }
@@ -194,6 +199,7 @@ impl JavaSqlImports {
             && !self.sql_exception
             && !self.driver_manager
             && !self.optional
+            && !self.android_context
     }
 
     fn qualify(self, name: &str) -> Option<&'static str> {
@@ -215,6 +221,7 @@ impl JavaSqlImports {
                 Some("java.sql.DriverManager")
             }
             "Optional" if self.optional => Some("j$.util.Optional"),
+            "Context" if self.android_context => Some("android.content.Context"),
             _ => None,
         }
     }
