@@ -4975,7 +4975,11 @@ const PRIMITIVE_OPTIONAL_TYPES: [(&str, PrimitiveType); 3] = [
 ];
 
 pub(crate) fn primitive_optional_payload(name: &str) -> Option<PrimitiveType> {
-    let name = name.strip_prefix("java.util.").unwrap_or(name);
+    // D8 desugars java.util to j$.util in the dex the stubs come from.
+    let name = name
+        .strip_prefix("java.util.")
+        .or_else(|| name.strip_prefix("j$.util."))
+        .unwrap_or(name);
     PRIMITIVE_OPTIONAL_TYPES
         .iter()
         .find_map(|(owner, primitive)| (*owner == name).then_some(*primitive))

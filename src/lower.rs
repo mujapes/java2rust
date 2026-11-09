@@ -66650,8 +66650,15 @@ fn clone_recovery_decision_for_argument(
         && actual_shape.is_none_or(shape_is_erased_object_value_like)
         && reused_erased_object_value_argument_needs_clone(source, env, ctx)
     {
-        // A reused shared handle still has to be erased for an Object parameter;
-        // leaving it unerased passes Rc<RefCell<_>> where Box<dyn Any> is expected.
+        if actual_shape.is_some_and(|shape| {
+            slot_java_type_is_shared_handle_with_representations(
+                &shape.java_ty,
+                ctx.facts,
+                ctx.representations,
+            )
+        }) {
+            return CloneRecoveryDecision::NoRecovery;
+        }
         return CloneRecoveryDecision::ApplyRecoveryCoercion {
             coercion: Coercion::CloneErasedObject {
                 sequence: false,
