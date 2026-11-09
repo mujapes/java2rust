@@ -5733,6 +5733,11 @@ fn call_result_boundary_policies_with_context(
     semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
 ) -> Vec<CallResultBoundaryPolicy> {
+    // A cast initializer fixes the local's type, not the call's return type; do not
+    // constrain the call's return from the local's declared type through the cast.
+    if matches!(expr, Expr::Cast { .. }) {
+        return Vec::new();
+    }
     match expr {
         Expr::Cast { expr, .. } => call_result_boundary_policies_with_context(
             expr,
