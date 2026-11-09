@@ -25267,6 +25267,10 @@ impl ExternalApiFacadeSupport {
             );
             self.add_opaque_type(return_rust.clone());
             (return_rust, true)
+        } else if matches!(fact.role, ExternalApiRole::Unknown) {
+            // An unknown-role unmodelled call may return a value a cast later downcasts from;
+            // an erased object lets that cast type-check instead of collapsing to `()`.
+            ("std::boxed::Box<dyn std::any::Any>".to_string(), true)
         } else {
             ("()".to_string(), false)
         }
