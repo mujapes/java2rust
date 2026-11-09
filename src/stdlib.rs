@@ -28240,6 +28240,10 @@ impl ExternalApiFacadeSupport {
     }
 
     fn add_method(&mut self, owner: String, method: String) -> bool {
+        if std::env::var_os("J2R_DEBUG_CAST").is_some() && method.contains("find_view_by_id") {
+            eprintln!("J2R_DEBUG_ADDMETHOD owner={} method={}", owner, method);
+            eprintln!("{}", std::backtrace::Backtrace::force_capture());
+        }
         if is_awt_platform_facade_owner(&owner) {
             return false;
         }
